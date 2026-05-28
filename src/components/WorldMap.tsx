@@ -94,6 +94,8 @@ export function WorldMap({
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const gRef = useRef<SVGGElement>(null);
+  const tooltipHostRef = useRef<HTMLDivElement>(null);
+  const tooltipPinnedRef = useRef(false);
   const zoomRef = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
@@ -284,6 +286,87 @@ export function WorldMap({
     applyAnimatedTransform(svg, behavior, zoomIdentity);
   }, []);
 
+  const lngLatFromMouseEvent = useCallback(
+    (e: React.MouseEvent): [number, number] | null => {
+      const g = gRef.current;
+      const svg = svgRef.current;
+      const projection = mapProjection?.projection;
+      if (!g || !svg || !projection) return null;
+
+      const svgPt = svg.createSVGPoint();
+      svgPt.x = e.clientX;
+      svgPt.y = e.clientY;
+      const ctm = g.getScreenCTM();
+      if (!ctm) return null;
+
+      const local = svgPt.matrixTransform(ctm.inverse());
+      const invert = projection.invert;
+      if (!invert) return null;
+      const lngLat = invert.call(projection, [local.x, local.y]);
+      return lngLat ?? null;
+    },
+    [mapProjection],
+  );
+
+  const buildTooltipState = useCallback(
+    (e: React.MouseEvent, tzid: string): TooltipState | null => {
+      const lateness = scores.get(tzid);
+      if (!lateness) return null;
+
+      const lngLat = lngLatFromMouseEvent(e);
+      const countryName = lngLat ? countryAtPoint(countries, lngLat) : null;
+
+      return {
+        x: e.clientX,
+        y: e.clientY,
+        countryName,
+        tzid,
+        lateness,
+        workHours: workHoursRangesInZone(userTz, tzid, userWorkHours),
+        userWorkHours,
+      };
+    },
+    [countries, lngLatFromMouseEvent, scores, userTz, userWorkHours],
+  );
+
+  const dismissTooltip = useCallback(() => {
+    tooltipPinnedRef.current = false;
+    setTooltip(null);
+  }, []);
+
+  const updateTooltip = useCallback(
+    (e: React.MouseEvent, tzid: string) => {
+      if (tooltipPinnedRef.current) return;
+      const state = buildTooltipState(e, tzid);
+      if (state) setTooltip(state);
+    },
+    [buildTooltipState],
+  );
+
+  const onTzClick = useCallback(
+    (e: React.MouseEvent, tzid: string) => {
+      onSelectTzids([tzid]);
+      const state = buildTooltipState(e, tzid);
+      if (state) {
+        tooltipPinnedRef.current = true;
+        setTooltip(state);
+      }
+
+      const lngLat = lngLatFromMouseEvent(e);
+      if (!lngLat) return;
+
+      const countryName = countryAtPoint(countries, lngLat);
+      if (countryName) onCountrySearchChange(countryName);
+    },
+    [
+      buildTooltipState,
+      countries,
+      lngLatFromMouseEvent,
+      onCountrySearchChange,
+      onSelectTzids,
+    ],
+  );
+
   // Resize observer
   useEffect(() => {
     const mq = window.matchMedia("(hover: hover) and (pointer: fine)");
@@ -316,7 +399,9 @@ export function WorldMap({
     const zoomBehavior = zoom<SVGSVGElement, unknown>()
       .scaleExtent([1, 12])
       .on("start", () => {
-        setTooltip(null);
+        if (!tooltipPinnedRef.current) {
+          setTooltip(null);
+        }
       })
       .on("zoom", (event) => {
         select(g).attr("transform", event.transform.toString());
@@ -342,68 +427,24 @@ export function WorldMap({
     if (resetViewNonce > 0) resetZoom();
   }, [resetViewNonce, resetZoom]);
 
-  const lngLatFromMouseEvent = useCallback(
-    (e: React.MouseEvent): [number, number] | null => {
-      const g = gRef.current;
-      const svg = svgRef.current;
-      const projection = mapProjection?.projection;
-      if (!g || !svg || !projection) return null;
+  const handleResetMapView = useCallback(() => {
+    dismissTooltip();
+    onResetMapView();
+  }, [dismissTooltip, onResetMapView]);
 
-      const svgPt = svg.createSVGPoint();
-      svgPt.x = e.clientX;
-      svgPt.y = e.clientY;
-      const ctm = g.getScreenCTM();
-      if (!ctm) return null;
+  useEffect(() => {
+    const onPointerDown = (e: PointerEvent) => {
+      if (!tooltipPinnedRef.current) return;
+      const target = e.target;
+      if (!(target instanceof Node)) return;
+      if (tooltipHostRef.current?.contains(target)) return;
+      if (target instanceof Element && target.closest(".tz-fill")) return;
+      dismissTooltip();
+    };
 
-      const local = svgPt.matrixTransform(ctm.inverse());
-      const invert = projection.invert;
-      if (!invert) return null;
-      const lngLat = invert.call(projection, [local.x, local.y]);
-      return lngLat ?? null;
-    },
-    [mapProjection],
-  );
-
-  const updateTooltip = useCallback(
-    (e: React.MouseEvent, tzid: string) => {
-      const lateness = scores.get(tzid);
-      if (!lateness) return;
-
-      const lngLat = lngLatFromMouseEvent(e);
-      const countryName = lngLat ? countryAtPoint(countries, lngLat) : null;
-
-      setTooltip({
-        x: e.clientX,
-        y: e.clientY,
-        countryName,
-        tzid,
-        lateness,
-        workHours: workHoursRangesInZone(userTz, tzid, userWorkHours),
-        userWorkHours,
-      });
-    },
-    [countries, lngLatFromMouseEvent, scores, userTz, userWorkHours],
-  );
-
-  const onTzClick = useCallback(
-    (e: React.MouseEvent, tzid: string) => {
-      onSelectTzids([tzid]);
-      updateTooltip(e, tzid);
-
-      const lngLat = lngLatFromMouseEvent(e);
-      if (!lngLat) return;
-
-      const countryName = countryAtPoint(countries, lngLat);
-      if (countryName) onCountrySearchChange(countryName);
-    },
-    [
-      countries,
-      lngLatFromMouseEvent,
-      onCountrySearchChange,
-      onSelectTzids,
-      updateTooltip,
-    ],
-  );
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [dismissTooltip]);
 
   const isDimmed = highlightedTzids.size > 0;
 
@@ -442,7 +483,9 @@ export function WorldMap({
                   onMouseEnter={() => onHoverTzids([tzid])}
                   onMouseLeave={() => {
                     onHoverTzids(null);
-                    setTooltip(null);
+                    if (!tooltipPinnedRef.current) {
+                      setTooltip(null);
+                    }
                   }}
                   onMouseMove={
                     hoverTooltipsEnabled
@@ -500,11 +543,13 @@ export function WorldMap({
           </g>
         </g>
       </svg>
-      <MapTooltip tooltip={tooltip} onDismiss={() => setTooltip(null)} />
+      <div ref={tooltipHostRef}>
+        <MapTooltip tooltip={tooltip} onDismiss={dismissTooltip} />
+      </div>
       <button
         type="button"
         className="map-reset-view"
-        onClick={onResetMapView}
+        onClick={handleResetMapView}
         aria-label="Reset map view"
       >
         Reset view
