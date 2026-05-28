@@ -118,7 +118,80 @@ export interface CountryTimezonePair {
   tzid: string;
 }
 
+export interface GeoIndexData {
+  pairs: CountryTimezonePair[];
+  primaryCountryByTz: Map<string, string | null>;
+}
+
 type GeoBounds = [[number, number], [number, number]];
+
+interface CountryMeta {
+  feature: CountryFeature;
+  name: string;
+  bounds: GeoBounds;
+  label: [number, number] | null;
+}
+
+interface TimezoneMeta {
+  feature: TimezoneFeature;
+  tzid: string;
+  bounds: GeoBounds;
+  center: [number, number];
+}
+
+function buildCountryMeta(countries: CountryFeature[]): CountryMeta[] {
+  return countries.map((feature) => ({
+    feature,
+    name: feature.properties.name,
+    bounds: geoBounds(feature),
+    label: getCountryLabelPoint(feature),
+  }));
+}
+
+function buildTimezoneMeta(timezones: TimezoneFeature[]): TimezoneMeta[] {
+  return timezones.map((feature) => {
+    let center: [number, number] = [0, 0];
+    try {
+      center = geoCentroid(feature) as [number, number];
+    } catch {
+      /* invalid geometry */
+    }
+    return {
+      feature,
+      tzid: feature.properties.tzid,
+      bounds: geoBounds(feature),
+      center,
+    };
+  });
+}
+
+function timezoneOverlapsCountryFast(
+  tz: TimezoneMeta,
+  country: CountryMeta,
+): boolean {
+  if (!boundsOverlap(country.bounds, tz.bounds)) return false;
+  if (country.label && geoContains(tz.feature, country.label)) return true;
+  if (geoContains(country.feature, tz.center)) return true;
+  try {
+    if (geoContains(tz.feature, geoCentroid(country.feature))) return true;
+  } catch {
+    /* invalid geometry */
+  }
+  return false;
+}
+
+export async function loadGeoIndex(): Promise<GeoIndexData | null> {
+  const res = await fetch("/data/geo-index.json");
+  if (!res.ok) return null;
+  const data = (await res.json()) as {
+    pairs: CountryTimezonePair[];
+    primaryCountryByTz: Record<string, string | null>;
+  };
+  return {
+    pairs: data.pairs,
+    primaryCountryByTz: new Map(Object.entries(data.primaryCountryByTz)),
+  };
+}
 
 function boundsOverlap(a: GeoBounds, b: GeoBounds): boolean {
   return (
@@ -129,92 +202,42 @@ function boundsOverlap(a: GeoBounds, b: GeoBounds): boolean {
   );
 }
 
-function sampleRingPoints(ring: Position[], maxSamples: number): Position[] {
-  if (ring.length <= maxSamples) return ring;
-  const step = Math.max(1, Math.floor(ring.length / maxSamples));
-  const out: Position[] = [];
-  for (let i = 0; i < ring.length; i += step) out.push(ring[i]);
-  return out;
-}
-
-function timezoneOverlapsCountry(
-  tz: TimezoneFeature,
-  country: CountryFeature,
-): boolean {
-  const label = getCountryLabelPoint(country);
-  if (label && geoContains(tz, label)) return true;
-
-  try {
-    const tzCenter = geoCentroid(tz);
-    if (geoContains(country, tzCenter)) return true;
-  } catch {
-    /* invalid geometry */
-  }
-
-  for (const poly of getPolygons(country.geometry)) {
-    const ring = poly[0];
-    if (!ring) continue;
-    for (const p of sampleRingPoints(ring, 16)) {
-      if (geoContains(tz, p as [number, number])) return true;
-    }
-  }
-
-  for (const poly of getPolygons(tz.geometry)) {
-    const ring = poly[0];
-    if (!ring) continue;
-    for (const p of sampleRingPoints(ring, 8)) {
-      if (geoContains(country, p as [number, number])) return true;
-    }
-  }
-
-  return false;
-}
-
-/** Country whose land contains the timezone centroid, else largest sampled overlap. */
+/** Country whose land contains the timezone centroid (fast path). */
 export function primaryCountryForTimezone(
   tz: TimezoneFeature,
   countries: CountryFeature[],
+  countryMeta?: CountryMeta[],
+  tzMeta?: TimezoneMeta,
 ): string | null {
-  try {
-    const center = geoCentroid(tz);
-    for (const country of countries) {
-      if (geoContains(country, center)) return country.properties.name;
-    }
-  } catch {
-    /* invalid geometry */
+  const meta =
+    tzMeta ??
+    ({
+      feature: tz,
+      tzid: tz.properties.tzid,
+      bounds: geoBounds(tz),
+      center: geoCentroid(tz) as [number, number],
+    } satisfies TimezoneMeta);
+  const countriesList = countryMeta ?? buildCountryMeta(countries);
+
+  for (const country of countriesList) {
+    if (!boundsOverlap(country.bounds, meta.bounds)) continue;
+    if (geoContains(country.feature, meta.center)) return country.name;
   }
-
-  let bestCountry: string | null = null;
-  let bestCount = 0;
-
-  for (const country of countries) {
-    if (!timezoneOverlapsCountry(tz, country)) continue;
-
-    let count = 0;
-    for (const poly of getPolygons(tz.geometry)) {
-      const ring = poly[0];
-      if (!ring) continue;
-      for (const p of sampleRingPoints(ring, 24)) {
-        if (geoContains(country, p as [number, number])) count++;
-      }
-    }
-
-    if (count > bestCount) {
-      bestCount = count;
-      bestCountry = country.properties.name;
-    }
-  }
-
-  return bestCountry;
+  return null;
 }
 
 export function primaryCountryByTimezone(
   countries: CountryFeature[],
   timezones: TimezoneFeature[],
 ): Map<string, string | null> {
+  const countryMeta = buildCountryMeta(countries);
+  const timezoneMeta = buildTimezoneMeta(timezones);
   const map = new Map<string, string | null>();
-  for (const tz of timezones) {
-    map.set(tz.properties.tzid, primaryCountryForTimezone(tz, countries));
+  for (const tz of timezoneMeta) {
+    map.set(
+      tz.tzid,
+      primaryCountryForTimezone(tz.feature, countries, countryMeta, tz),
+    );
   }
   return map;
 }
@@ -224,28 +247,20 @@ export function countryTimezonePairs(
   countries: CountryFeature[],
   timezones: TimezoneFeature[],
 ): CountryTimezonePair[] {
+  const countryMeta = buildCountryMeta(countries);
+  const timezoneMeta = buildTimezoneMeta(timezones);
   const pairs: CountryTimezonePair[] = [];
-  const tzBoundsCache = new Map<TimezoneFeature, GeoBounds>();
 
-  for (const country of countries) {
-    const countryBounds = geoBounds(country);
+  for (const country of countryMeta) {
     const matched: string[] = [];
-
-    for (const tz of timezones) {
-      let tzBounds = tzBoundsCache.get(tz);
-      if (!tzBounds) {
-        tzBounds = geoBounds(tz);
-        tzBoundsCache.set(tz, tzBounds);
-      }
-      if (!boundsOverlap(countryBounds, tzBounds)) continue;
-      if (timezoneOverlapsCountry(tz, country)) {
-        matched.push(tz.properties.tzid);
+    for (const tz of timezoneMeta) {
+      if (timezoneOverlapsCountryFast(tz, country)) {
+        matched.push(tz.tzid);
       }
     }
-
     matched.sort();
     for (const tzid of matched) {
-      pairs.push({ countryName: country.properties.name, tzid });
+      pairs.push({ countryName: country.name, tzid });
     }
   }
 

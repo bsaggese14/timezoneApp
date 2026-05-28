@@ -12,6 +12,8 @@ import { execSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import simplify from '@turf/simplify'
 import { geoArea } from 'd3-geo'
+import { feature as topoFeature } from 'topojson-client'
+import { buildGeoIndexJson } from './geoIndex.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, '..')
@@ -230,6 +232,22 @@ async function main() {
   const indexPath = join(OUT_DIR, 'timezone-index.json')
   await writeFile(indexPath, JSON.stringify(tzids, null, 0))
   console.log(`Wrote ${indexPath} (${tzids.length} zones)`)
+
+  console.log('Building country–timezone index…')
+  const topology = JSON.parse(await readFile(countriesPath, 'utf8'))
+  const countryFc = topoFeature(topology, topology.objects.countries)
+  const countries = countryFc.features
+    .filter((f) => f.properties?.name)
+    .map((f) => ({
+      ...f,
+      properties: { name: String(f.properties.name) },
+    }))
+  const geoIndex = buildGeoIndexJson(countries, simplified.features)
+  const geoIndexPath = join(OUT_DIR, 'geo-index.json')
+  await writeFile(geoIndexPath, JSON.stringify(geoIndex))
+  console.log(
+    `Wrote ${geoIndexPath} (${geoIndex.pairs.length} pairs, ${Object.keys(geoIndex.primaryCountryByTz).length} zones)`,
+  )
 
   try {
     await unlink(zipPath)

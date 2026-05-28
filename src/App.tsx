@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MapLoadingOverlay } from "./components/MapLoadingOverlay";
 import { WorldMap } from "./components/WorldMap";
 import { TimezonePanel } from "./components/TimezonePanel";
+import { runAppWarmup } from "./lib/appWarmup";
 import {
   detectUserTimezone,
   loadCountries,
@@ -13,14 +15,18 @@ import {
   type TimezoneFeature,
   type UsSearchData,
 } from "./lib/geo";
-import { useTimezoneScores } from "./hooks/useTimezoneScores";
+import type { GeoIndex, PanelTableData } from "./lib/panelData";
+import { buildPanelTable } from "./lib/panelData";
+import { yieldToMain } from "./lib/yieldToMain";
 import {
+  computeAllZoneLateness,
   DEFAULT_PEAK_LATENESS_RANGE,
   DEFAULT_USER_WORK_HOURS,
   normalizePeakLatenessRange,
   normalizeUserWorkHours,
   type PeakLatenessRange,
   type UserWorkHours,
+  type ZoneLateness,
 } from "./lib/workHours";
 import "./styles/global.css";
 
@@ -78,12 +84,17 @@ function App() {
     Map<string, string[]>
   >(() => new Map());
   const [usSearch, setUsSearch] = useState<UsSearchData | null>(null);
+  const [geoIndex, setGeoIndex] = useState<GeoIndex | null>(null);
+  const [panelTable, setPanelTable] = useState<PanelTableData | null>(null);
+  const skipPanelRebuildRef = useRef(false);
   const [userTz, setUserTz] = useState(
     () => timezoneFromQuery() ?? detectUserTimezone(),
   );
   const [peakLateRange, setPeakLateRange] = useState(readStoredPeakLateRange);
   const [userWorkHours, setUserWorkHours] = useState(readStoredUserWorkHours);
   const [loading, setLoading] = useState(true);
+  const [loadingMessage, setLoadingMessage] = useState("Loading map data…");
+  const [mapPainted, setMapPainted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hoveredTzids, setHoveredTzids] = useState<string[] | null>(null);
   const [selectedTzids, setSelectedTzids] = useState<string[] | null>(null);
@@ -95,7 +106,11 @@ function App() {
     (async () => {
       try {
         setLoading(true);
+        setMapPainted(false);
         setError(null);
+        setGeoIndex(null);
+        setLoadingMessage("Loading map data…");
+
         const [c, t, index, cities, us] = await Promise.all([
           loadCountries(),
           loadTimezones(),
@@ -104,17 +119,39 @@ function App() {
           loadUsSearch(),
         ]);
         if (cancelled) return;
+
+        setLoadingMessage("Preparing map…");
+        const tzids = t.map((f) => f.properties.tzid);
+        const merged = [
+          ...new Set([...index, ...tzids]),
+        ].sort();
+
+        let resolvedUserTz = userTz;
+        if (!merged.includes(userTz) && merged.length > 0) {
+          resolvedUserTz = merged.includes("UTC") ? "UTC" : merged[0];
+        }
+
+        const warmup = await runAppWarmup(
+          c,
+          t,
+          tzids,
+          resolvedUserTz,
+          peakLateRange,
+          userWorkHours,
+          cities,
+          us,
+        );
+        if (cancelled) return;
+
         setCountries(c);
         setTimezones(t);
         setCitiesByTimezone(cities);
         setUsSearch(us);
-        const merged = [
-          ...new Set([...index, ...t.map((f) => f.properties.tzid)]),
-        ].sort();
         setTimezoneOptions(merged);
-        if (!merged.includes(userTz) && merged.length > 0) {
-          setUserTz(merged.includes("UTC") ? "UTC" : merged[0]);
-        }
+        setUserTz(resolvedUserTz);
+        setGeoIndex(warmup.geoIndex);
+        skipPanelRebuildRef.current = true;
+        setPanelTable(warmup.panelTable);
       } catch (e) {
         if (!cancelled) {
           setError(e instanceof Error ? e.message : "Failed to load map data");
@@ -128,17 +165,70 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    setMapPainted(false);
+  }, [countries, timezones]);
+
   const tzidsOnMap = useMemo(
     () => timezones.map((f) => f.properties.tzid),
     [timezones],
   );
 
-  const scores = useTimezoneScores(
+  const scores = useMemo((): Map<string, ZoneLateness> => {
+    if (!geoIndex || tzidsOnMap.length === 0) return new Map();
+    return computeAllZoneLateness(
+      userTz,
+      tzidsOnMap,
+      peakLateRange,
+      userWorkHours,
+    );
+  }, [geoIndex, tzidsOnMap, userTz, peakLateRange, userWorkHours]);
+
+  useEffect(() => {
+    if (!geoIndex) return;
+    if (skipPanelRebuildRef.current) {
+      skipPanelRebuildRef.current = false;
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      await yieldToMain();
+      if (cancelled) return;
+      setPanelTable(
+        buildPanelTable(
+          geoIndex,
+          scores,
+          userTz,
+          userWorkHours,
+          citiesByTimezone,
+          usSearch,
+        ),
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    geoIndex,
+    scores,
     userTz,
-    tzidsOnMap,
-    peakLateRange,
     userWorkHours,
-  );
+    citiesByTimezone,
+    usSearch,
+  ]);
+
+  const onMapPainted = useCallback(() => {
+    setMapPainted(true);
+  }, []);
+
+  const appReady =
+    !loading &&
+    !error &&
+    geoIndex != null &&
+    panelTable != null &&
+    mapPainted &&
+    countries.length > 0 &&
+    timezones.length > 0;
 
   const onPeakLateRangeChange = useCallback((range: PeakLatenessRange) => {
     const normalized = normalizePeakLatenessRange(range);
@@ -179,8 +269,13 @@ function App() {
     setResetViewNonce((n) => n + 1);
   }, []);
 
+  const mapReady = !loading && !error && geoIndex != null && countries.length > 0;
+
   return (
-    <div className="app">
+    <div className={`app${appReady ? "" : " app--blocked"}`}>
+      {!appReady && !error && (
+        <MapLoadingOverlay message={loadingMessage} />
+      )}
       <TimezonePanel
         userTz={userTz}
         timezoneOptions={timezoneOptions}
@@ -191,11 +286,12 @@ function App() {
         onUserWorkHoursChange={onUserWorkHoursChange}
         countries={countries}
         timezones={timezones}
-        citiesByTimezone={citiesByTimezone}
+        geoIndex={geoIndex}
+        panelTable={panelTable}
         usSearch={usSearch}
-        scores={scores}
         loading={loading}
         error={error}
+        appReady={appReady}
         hoveredTzids={hoveredTzids}
         onHoverTzids={setHoveredTzids}
         selectedTzids={selectedTzids}
@@ -205,7 +301,7 @@ function App() {
         onResetMapView={onResetMapView}
       />
       <main className="app-main">
-        {!loading && !error && countries.length > 0 && timezones.length > 0 && (
+        {mapReady && (
           <WorldMap
             countries={countries}
             timezones={timezones}
@@ -219,6 +315,8 @@ function App() {
             resetViewNonce={resetViewNonce}
             onResetMapView={onResetMapView}
             onCountrySearchChange={setCountrySearch}
+            onMapPainted={onMapPainted}
+            labelsEnabled={appReady}
           />
         )}
         {!loading && error && (

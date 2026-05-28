@@ -1,29 +1,24 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { SearchableSelect } from "./SearchableSelect";
-import { interpolateReds } from "d3-scale-chromatic";
 import type {
   CountryFeature,
   TimezoneFeature,
   UsSearchData,
 } from "../lib/geo";
-import {
-  US_COUNTRY_NAME,
-  countryTimezonePairs,
-  primaryCountryByTimezone,
-} from "../lib/geo";
+import { US_COUNTRY_NAME } from "../lib/geo";
+import type {
+  CountryRow,
+  GeoIndex,
+  PanelTableData,
+} from "../lib/panelData";
 import {
   getPeakLatenessHourOptions,
   getWorkHoursColumnPresets,
   isPrimaryWorkHoursColumn,
-  scoreToFill,
   textColorForBackground,
-  workHoursRangesInZone,
-  workHoursSignature,
   workStartLabel,
   type PeakLatenessRange,
   type UserWorkHours,
-  type WorkHoursRange,
-  type ZoneLateness,
 } from "../lib/workHours";
 
 interface TimezonePanelProps {
@@ -36,11 +31,12 @@ interface TimezonePanelProps {
   onUserWorkHoursChange: (hours: UserWorkHours) => void;
   countries: CountryFeature[];
   timezones: TimezoneFeature[];
-  citiesByTimezone: Map<string, string[]>;
+  geoIndex: GeoIndex | null;
+  panelTable: PanelTableData | null;
   usSearch: UsSearchData | null;
-  scores: Map<string, ZoneLateness>;
   loading?: boolean;
   error?: string | null;
+  appReady?: boolean;
   hoveredTzids: string[] | null;
   onHoverTzids: (tzids: string[] | null) => void;
   selectedTzids: string[] | null;
@@ -48,27 +44,6 @@ interface TimezonePanelProps {
   countrySearch: string;
   onCountrySearchChange: (value: string) => void;
   onResetMapView: () => void;
-}
-
-interface CountryRow {
-  countryName: string;
-  tzid: string;
-  cities: string[];
-  lateness: ZoneLateness | null;
-  workHours: WorkHoursRange[];
-  fill: string;
-  sameWorkHours: boolean;
-}
-
-interface HourGroup {
-  key: string;
-  countryName: string;
-  tzids: string[];
-  lateness: ZoneLateness | null;
-  workHours: WorkHoursRange[];
-  fill: string;
-  sameWorkHours: boolean;
-  includesUserTz: boolean;
 }
 
 const PEAK_LATENESS_OPTIONS = getPeakLatenessHourOptions();
@@ -182,85 +157,6 @@ function countrySearchScore(
   return best;
 }
 
-function listSortTier(row: CountryRow, userTz: string): number {
-  if (row.tzid === userTz) return 0;
-  return 1;
-}
-
-function rowLatenessScore(row: CountryRow): number {
-  return row.lateness?.score ?? -1;
-}
-
-function isUserTimezonePrimaryCountry(
-  row: CountryRow,
-  userTz: string,
-  primaryCountryByTz: Map<string, string | null>,
-): boolean {
-  const userPrimary = primaryCountryByTz.get(userTz);
-  return userPrimary != null && row.countryName === userPrimary;
-}
-
-function compareHourGroups(
-  a: HourGroup,
-  b: HourGroup,
-  userTz: string,
-  primaryCountryByTz: Map<string, string | null>,
-): number {
-  const repA: CountryRow = {
-    countryName: a.countryName,
-    tzid: a.tzids[0] ?? "",
-    cities: [],
-    lateness: a.lateness,
-    workHours: a.workHours,
-    fill: a.fill,
-    sameWorkHours: a.sameWorkHours,
-  };
-  const repB: CountryRow = {
-    countryName: b.countryName,
-    tzid: b.tzids[0] ?? "",
-    cities: [],
-    lateness: b.lateness,
-    workHours: b.workHours,
-    fill: b.fill,
-    sameWorkHours: b.sameWorkHours,
-  };
-  return compareCountryTimezoneRows(repA, repB, userTz, primaryCountryByTz);
-}
-
-function compareCountryTimezoneRows(
-  a: CountryRow,
-  b: CountryRow,
-  userTz: string,
-  primaryCountryByTz: Map<string, string | null>,
-): number {
-  const tierA = listSortTier(a, userTz);
-  const tierB = listSortTier(b, userTz);
-  if (tierA !== tierB) return tierA - tierB;
-
-  const aUserCountry = isUserTimezonePrimaryCountry(
-    a,
-    userTz,
-    primaryCountryByTz,
-  );
-  const bUserCountry = isUserTimezonePrimaryCountry(
-    b,
-    userTz,
-    primaryCountryByTz,
-  );
-  if (aUserCountry !== bUserCountry) return aUserCountry ? -1 : 1;
-
-  if (tierA === 0) {
-    if (a.tzid !== b.tzid) return a.tzid.localeCompare(b.tzid);
-    return a.countryName.localeCompare(b.countryName);
-  }
-
-  const scoreA = rowLatenessScore(a);
-  const scoreB = rowLatenessScore(b);
-  if (scoreA !== scoreB) return scoreA - scoreB;
-  if (a.tzid !== b.tzid) return a.tzid.localeCompare(b.tzid);
-  return a.countryName.localeCompare(b.countryName);
-}
-
 export function TimezonePanel({
   userTz,
   timezoneOptions,
@@ -271,11 +167,12 @@ export function TimezonePanel({
   onUserWorkHoursChange,
   countries,
   timezones,
-  citiesByTimezone,
+  geoIndex,
+  panelTable,
   usSearch,
-  scores,
   loading,
   error,
+  appReady = false,
   hoveredTzids,
   onHoverTzids,
   selectedTzids,
@@ -284,93 +181,28 @@ export function TimezonePanel({
   onCountrySearchChange,
   onResetMapView,
 }: TimezonePanelProps) {
-  const [collapsed, setCollapsed] = useState(false);
-  const colorRed = useMemo(() => interpolateReds, []);
+  const [collapsed, setCollapsed] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      window.matchMedia("(max-width: 768px)").matches,
+  );
+  const [deferCountryList, setDeferCountryList] = useState(false);
+  const primaryCountryByTz = useMemo(
+    () => geoIndex?.primaryCountryByTz ?? new Map<string, string | null>(),
+    [geoIndex],
+  );
+  const rows = useMemo(() => panelTable?.rows ?? [], [panelTable]);
+  const hourGroups = useMemo(() => panelTable?.hourGroups ?? [], [panelTable]);
+  const countrySearchIndex = useMemo(
+    () => panelTable?.countrySearchIndex ?? new Map<string, Set<string>>(),
+    [panelTable],
+  );
+
   const workHoursColumns = useMemo(
     () => getWorkHoursColumnPresets(userWorkHours),
     [userWorkHours],
   );
   const workStart = workStartLabel(userWorkHours);
-
-  const pairs = useMemo(
-    () => countryTimezonePairs(countries, timezones),
-    [countries, timezones],
-  );
-
-  const primaryCountryByTz = useMemo(
-    () => primaryCountryByTimezone(countries, timezones),
-    [countries, timezones],
-  );
-
-  const rows = useMemo((): CountryRow[] => {
-    const built = pairs.map(({ countryName, tzid }) => {
-      const lateness = scores.get(tzid) ?? null;
-      const workHours = workHoursRangesInZone(userTz, tzid, userWorkHours);
-      const score = lateness?.score ?? 0;
-      const fill =
-        lateness != null
-          ? scoreToFill(score, colorRed, lateness.sameWorkHours)
-          : "#e2e8f0";
-
-      return {
-        countryName,
-        tzid,
-        cities: citiesByTimezone.get(tzid) ?? [],
-        lateness,
-        workHours,
-        fill,
-        sameWorkHours: lateness?.sameWorkHours ?? false,
-      };
-    });
-
-    return built.sort((a, b) =>
-      compareCountryTimezoneRows(a, b, userTz, primaryCountryByTz),
-    );
-  }, [
-    pairs,
-    scores,
-    userTz,
-    userWorkHours,
-    colorRed,
-    primaryCountryByTz,
-    citiesByTimezone,
-  ]);
-
-  const hourGroups = useMemo((): HourGroup[] => {
-    const byKey = new Map<string, HourGroup>();
-
-    for (const row of rows) {
-      const key = `${row.countryName}\0${workHoursSignature(row.workHours)}`;
-      let group = byKey.get(key);
-      if (!group) {
-        group = {
-          key,
-          countryName: row.countryName,
-          tzids: [],
-          lateness: row.lateness,
-          workHours: row.workHours,
-          fill: row.fill,
-          sameWorkHours: row.sameWorkHours,
-          includesUserTz: false,
-        };
-        byKey.set(key, group);
-      }
-
-      if (!group.tzids.includes(row.tzid)) {
-        group.tzids.push(row.tzid);
-      }
-      if (row.tzid === userTz) group.includesUserTz = true;
-    }
-
-    const groups = [...byKey.values()];
-    for (const group of groups) {
-      group.tzids.sort((a, b) => a.localeCompare(b));
-    }
-
-    return groups.sort((a, b) =>
-      compareHourGroups(a, b, userTz, primaryCountryByTz),
-    );
-  }, [rows, userTz, primaryCountryByTz]);
 
   const filteredGroups = useMemo(() => {
     if (!countrySearch.trim()) return hourGroups;
@@ -385,36 +217,6 @@ export function TimezonePanel({
     () => (selectedTzids ? new Set(selectedTzids) : null),
     [selectedTzids],
   );
-
-  const countrySearchIndex = useMemo(() => {
-    const keywordsByCountry = new Map<string, Set<string>>();
-    for (const row of rows) {
-      const terms =
-        keywordsByCountry.get(row.countryName) ?? new Set<string>();
-      terms.add(row.countryName);
-      // Cities/timezones belong to the zone's primary country (e.g. Lima → Peru).
-      if (primaryCountryByTz.get(row.tzid) === row.countryName) {
-        terms.add(row.tzid);
-        for (const city of row.cities) {
-          if (city.trim()) terms.add(city);
-        }
-      }
-      keywordsByCountry.set(row.countryName, terms);
-    }
-
-    if (usSearch) {
-      const usTerms = keywordsByCountry.get(usSearch.country) ?? new Set();
-      for (const state of usSearch.stateToTimezones.keys()) {
-        usTerms.add(state);
-      }
-      for (const abbrev of usSearch.abbrevToState.keys()) {
-        usTerms.add(abbrev);
-      }
-      keywordsByCountry.set(usSearch.country, usTerms);
-    }
-
-    return keywordsByCountry;
-  }, [rows, primaryCountryByTz, usSearch]);
 
   const countryFilterOptions = useMemo(
     () => [...countrySearchIndex.keys()].sort((a, b) => a.localeCompare(b)),
@@ -458,15 +260,49 @@ export function TimezonePanel({
 
   const showCountryList = countries.length > 0 && timezones.length > 0;
 
+  const toggleCollapsed = useCallback(() => {
+    setDeferCountryList(true);
+    setCollapsed((open) => !open);
+  }, []);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 768px)");
+    const onChange = (e: MediaQueryListEvent) => {
+      if (e.matches) setCollapsed(true);
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  const onSidebarTransitionEnd = useCallback(
+    (e: React.TransitionEvent<HTMLDivElement>) => {
+      if (e.propertyName !== "transform" || collapsed) return;
+      setDeferCountryList(false);
+    },
+    [collapsed],
+  );
+
   return (
-    <div className="sidebar-shell">
-      <aside
-        className={`sidebar${collapsed ? " sidebar--collapsed" : ""}`}
-        aria-label="Timezone settings and list"
-        aria-hidden={collapsed}
-      >
+    <div
+      className={`sidebar-shell${collapsed ? " sidebar-shell--collapsed" : ""}`}
+    >
+      <div className="sidebar-track" onTransitionEnd={onSidebarTransitionEnd}>
+        <aside
+          className="sidebar"
+          aria-label="Timezone settings and list"
+          aria-hidden={collapsed}
+          inert={collapsed ? true : undefined}
+        >
         <header className="panel-header">
           <h1>Timezone Work Map</h1>
+          <button
+            type="button"
+            className="panel-header-close"
+            aria-label="Close sidebar"
+            onClick={toggleCollapsed}
+          >
+            ×
+          </button>
         </header>
 
         <div className="sidebar-content">
@@ -483,9 +319,13 @@ export function TimezonePanel({
               value={userTz}
               options={timezoneOptions}
               placeholder="Search timezones…"
-              disabled={loading}
+              disabled={loading || !appReady}
               onChange={onTimezoneChange}
             />
+
+            {!appReady && !loading && (
+              <p className="panel-loading">Preparing controls…</p>
+            )}
 
             <div className="work-hours-section">
               <span className="field-label">
@@ -609,7 +449,7 @@ export function TimezonePanel({
             </p>
           </div>
 
-          {showCountryList && (
+          {appReady && showCountryList && !collapsed && !deferCountryList && (
             <div className="country-list-body">
               <div className="country-list-search">
                 <label className="field-label" htmlFor="country-search">
@@ -729,16 +569,17 @@ export function TimezonePanel({
             </div>
           )}
         </div>
-      </aside>
-      <button
-        type="button"
-        className="sidebar-toggle"
-        aria-expanded={!collapsed}
-        aria-label={collapsed ? "Open sidebar" : "Close sidebar"}
-        onClick={() => setCollapsed((c) => !c)}
-      >
-        {collapsed ? "▸" : "◂"}
-      </button>
+        </aside>
+        <button
+          type="button"
+          className="sidebar-toggle"
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? "Open sidebar" : "Close sidebar"}
+          onClick={toggleCollapsed}
+        >
+          {collapsed ? "▸" : "◂"}
+        </button>
+      </div>
     </div>
   );
 }

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { easeCubicInOut } from "d3-ease";
 import { select } from "d3-selection";
 import "d3-transition";
@@ -31,6 +38,9 @@ interface WorldMapProps {
   resetViewNonce: number;
   onResetMapView: () => void;
   onCountrySearchChange: (value: string) => void;
+  onMapPainted?: () => void;
+  /** Defer expensive country labels until the app is interactive. */
+  labelsEnabled?: boolean;
 }
 
 const ZOOM_PADDING = 48;
@@ -63,6 +73,8 @@ export function WorldMap({
   resetViewNonce,
   onResetMapView,
   onCountrySearchChange,
+  onMapPainted,
+  labelsEnabled = false,
 }: WorldMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -70,15 +82,13 @@ export function WorldMap({
   const zoomRef = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
+  const [showCountryLabels, setShowCountryLabels] = useState(false);
 
-  const combinedGeo = useMemo((): GeoPermissibleObjects => {
-    return {
-      type: "FeatureCollection",
-      features: [...timezones, ...countries],
-    };
-  }, [countries, timezones]);
+  const projectionGeo = useMemo((): GeoPermissibleObjects => {
+    return { type: "FeatureCollection", features: timezones };
+  }, [timezones]);
 
-  const mapProjection = useMapProjection(size.width, size.height, combinedGeo);
+  const mapProjection = useMapProjection(size.width, size.height, projectionGeo);
   const colorRed = useMemo(() => interpolateReds, []);
 
   const timezoneById = useMemo(() => {
@@ -94,20 +104,26 @@ export function WorldMap({
     return set;
   }, [hoveredTzids, selectedTzids]);
 
-  const timezonePaths = useMemo(() => {
+  const timezoneGeometries = useMemo(() => {
     if (!mapProjection) return [];
     const { pathGenerator } = mapProjection;
-    return timezones.map((f) => {
-      const tzid = f.properties.tzid;
+    return timezones.map((f) => ({
+      tzid: f.properties.tzid,
+      d: pathGenerator(f) ?? "",
+    }));
+  }, [timezones, mapProjection]);
+
+  const timezonePaths = useMemo(() => {
+    return timezoneGeometries.map(({ tzid, d }) => {
       const lateness = scores.get(tzid);
       const score = lateness?.score ?? 0;
       return {
         tzid,
-        d: pathGenerator(f) ?? "",
+        d,
         fill: scoreToFill(score, colorRed, lateness?.sameWorkHours ?? false),
       };
     });
-  }, [timezones, scores, mapProjection, colorRed]);
+  }, [timezoneGeometries, scores, colorRed]);
 
   const countryPaths = useMemo(() => {
     if (!mapProjection) return [];
@@ -118,8 +134,19 @@ export function WorldMap({
     }));
   }, [countries, mapProjection]);
 
+  useEffect(() => {
+    if (!labelsEnabled || !mapProjection) return;
+    const id = requestIdleCallback(() => setShowCountryLabels(true), {
+      timeout: 3000,
+    });
+    return () => {
+      cancelIdleCallback(id);
+      setShowCountryLabels(false);
+    };
+  }, [labelsEnabled, mapProjection, countries, timezones]);
+
   const countryLabels = useMemo(() => {
-    if (!mapProjection) return [];
+    if (!showCountryLabels || !mapProjection) return [];
     const { projection, pathGenerator } = mapProjection;
     return countries
       .map((f) => {
@@ -159,7 +186,20 @@ export function WorldMap({
         };
       })
       .filter((x): x is NonNullable<typeof x> => x !== null);
-  }, [countries, mapProjection]);
+  }, [countries, mapProjection, showCountryLabels]);
+
+  useLayoutEffect(() => {
+    if (
+      !onMapPainted ||
+      size.width <= 0 ||
+      size.height <= 0 ||
+      timezoneGeometries.length === 0
+    ) {
+      return;
+    }
+    const frame = requestAnimationFrame(() => onMapPainted());
+    return () => cancelAnimationFrame(frame);
+  }, [onMapPainted, size.width, size.height, timezoneGeometries.length]);
 
   const graticulePath = useMemo(() => {
     if (!mapProjection) return "";

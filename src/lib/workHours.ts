@@ -221,12 +221,15 @@ export function computeAllZoneLateness(
   userWorkHours: UserWorkHours = DEFAULT_USER_WORK_HOURS,
   anchorDate?: string,
 ): Map<string, ZoneLateness> {
+  const anchor =
+    anchorDate ?? DateTime.now().setZone(userTz).toISODate() ?? undefined;
+  const now = DateTime.now();
   const map = new Map<string, ZoneLateness>();
   for (const tzid of tzids) {
-    if (!DateTime.now().setZone(tzid).isValid) continue;
+    if (!now.setZone(tzid).isValid) continue;
     map.set(
       tzid,
-      computeZoneLateness(userTz, tzid, peakLateRange, userWorkHours, anchorDate),
+      computeZoneLateness(userTz, tzid, peakLateRange, userWorkHours, anchor),
     );
   }
   return map;
