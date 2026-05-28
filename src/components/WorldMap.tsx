@@ -48,6 +48,21 @@ const ZOOM_ANIMATION_MS = 600;
 /** How much of the fit-to-bounds zoom to apply (0.5 ≈ half as close). */
 const ZOOM_INTENSITY = 0.5;
 
+function scheduleIdleWork(callback: () => void, timeoutMs: number): number {
+  if (typeof requestIdleCallback === "function") {
+    return requestIdleCallback(callback, { timeout: timeoutMs });
+  }
+  return window.setTimeout(callback, 1);
+}
+
+function cancelIdleWork(id: number): void {
+  if (typeof cancelIdleCallback === "function") {
+    cancelIdleCallback(id);
+    return;
+  }
+  window.clearTimeout(id);
+}
+
 function applyAnimatedTransform(
   svg: SVGSVGElement,
   behavior: ZoomBehavior<SVGSVGElement, unknown>,
@@ -136,11 +151,9 @@ export function WorldMap({
 
   useEffect(() => {
     if (!labelsEnabled || !mapProjection) return;
-    const id = requestIdleCallback(() => setShowCountryLabels(true), {
-      timeout: 3000,
-    });
+    const id = scheduleIdleWork(() => setShowCountryLabels(true), 3000);
     return () => {
-      cancelIdleCallback(id);
+      cancelIdleWork(id);
       setShowCountryLabels(false);
     };
   }, [labelsEnabled, mapProjection, countries, timezones]);
