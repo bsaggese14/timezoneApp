@@ -98,6 +98,11 @@ export function WorldMap({
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
   const [showCountryLabels, setShowCountryLabels] = useState(false);
+  const [hoverTooltipsEnabled, setHoverTooltipsEnabled] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      window.matchMedia("(hover: hover) and (pointer: fine)").matches,
+  );
 
   const projectionGeo = useMemo((): GeoPermissibleObjects => {
     return { type: "FeatureCollection", features: timezones };
@@ -281,6 +286,14 @@ export function WorldMap({
 
   // Resize observer
   useEffect(() => {
+    const mq = window.matchMedia("(hover: hover) and (pointer: fine)");
+    const onChange = () => setHoverTooltipsEnabled(mq.matches);
+    onChange();
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
 
@@ -302,6 +315,9 @@ export function WorldMap({
 
     const zoomBehavior = zoom<SVGSVGElement, unknown>()
       .scaleExtent([1, 12])
+      .on("start", () => {
+        setTooltip(null);
+      })
       .on("zoom", (event) => {
         select(g).attr("transform", event.transform.toString());
       });
@@ -348,20 +364,7 @@ export function WorldMap({
     [mapProjection],
   );
 
-  const onTzClick = useCallback(
-    (e: React.MouseEvent, tzid: string) => {
-      onSelectTzids([tzid]);
-
-      const lngLat = lngLatFromMouseEvent(e);
-      if (!lngLat) return;
-
-      const countryName = countryAtPoint(countries, lngLat);
-      if (countryName) onCountrySearchChange(countryName);
-    },
-    [countries, lngLatFromMouseEvent, onCountrySearchChange, onSelectTzids],
-  );
-
-  const onTzMouseMove = useCallback(
+  const updateTooltip = useCallback(
     (e: React.MouseEvent, tzid: string) => {
       const lateness = scores.get(tzid);
       if (!lateness) return;
@@ -380,6 +383,26 @@ export function WorldMap({
       });
     },
     [countries, lngLatFromMouseEvent, scores, userTz, userWorkHours],
+  );
+
+  const onTzClick = useCallback(
+    (e: React.MouseEvent, tzid: string) => {
+      onSelectTzids([tzid]);
+      updateTooltip(e, tzid);
+
+      const lngLat = lngLatFromMouseEvent(e);
+      if (!lngLat) return;
+
+      const countryName = countryAtPoint(countries, lngLat);
+      if (countryName) onCountrySearchChange(countryName);
+    },
+    [
+      countries,
+      lngLatFromMouseEvent,
+      onCountrySearchChange,
+      onSelectTzids,
+      updateTooltip,
+    ],
   );
 
   const isDimmed = highlightedTzids.size > 0;
@@ -421,7 +444,11 @@ export function WorldMap({
                     onHoverTzids(null);
                     setTooltip(null);
                   }}
-                  onMouseMove={(e) => onTzMouseMove(e, tzid)}
+                  onMouseMove={
+                    hoverTooltipsEnabled
+                      ? (e) => updateTooltip(e, tzid)
+                      : undefined
+                  }
                   onClick={(e) => onTzClick(e, tzid)}
                 />
               );
@@ -473,7 +500,7 @@ export function WorldMap({
           </g>
         </g>
       </svg>
-      <MapTooltip tooltip={tooltip} />
+      <MapTooltip tooltip={tooltip} onDismiss={() => setTooltip(null)} />
       <button
         type="button"
         className="map-reset-view"

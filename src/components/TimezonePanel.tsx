@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { SearchableSelect } from "./SearchableSelect";
 import type {
   CountryFeature,
@@ -181,11 +181,7 @@ export function TimezonePanel({
   onCountrySearchChange,
   onResetMapView,
 }: TimezonePanelProps) {
-  const [collapsed, setCollapsed] = useState(
-    () =>
-      typeof window !== "undefined" &&
-      window.matchMedia("(max-width: 768px)").matches,
-  );
+  const [collapsed, setCollapsed] = useState(true);
   const [deferCountryList, setDeferCountryList] = useState(false);
   const primaryCountryByTz = useMemo(
     () => geoIndex?.primaryCountryByTz ?? new Map<string, string | null>(),
@@ -263,15 +259,6 @@ export function TimezonePanel({
   const toggleCollapsed = useCallback(() => {
     setDeferCountryList(true);
     setCollapsed((open) => !open);
-  }, []);
-
-  useEffect(() => {
-    const mq = window.matchMedia("(max-width: 768px)");
-    const onChange = (e: MediaQueryListEvent) => {
-      if (e.matches) setCollapsed(true);
-    };
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
   }, []);
 
   const onSidebarTransitionEnd = useCallback(

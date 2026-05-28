@@ -213,7 +213,9 @@ async function main() {
       .map((f) => {
         const tzid = f.properties.tzid ?? f.properties.TZID
         const wound = rewindFeature(f)
-        const simplifiedFeature = simplifyFeature(wound, tolerance)
+        const simplifiedFeature = rewindFeature(
+          simplifyFeature(wound, tolerance),
+        )
         return {
           ...simplifiedFeature,
           properties: { tzid },
